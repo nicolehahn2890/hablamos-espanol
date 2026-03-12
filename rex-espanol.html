@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🦖 Rex habla español</title>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body style="margin:0;padding:0;background:linear-gradient(135deg,#ddd0ff 0%,#8ec5f5 100%);min-height:100vh;">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // ── MODI ──────────────────────────────────────────────────────────────
+    const MODES = {
+      chat:               { label: "Freies Gespräch",    color: "#b8f0d8", desc: "Rex chattet mit dir über alles" },
+      correct:            { label: "Satzkorrektur",      color: "#ddd6ff", desc: "Sprich Sätze – Rex korrigiert" },
+      "scene-restaurant": { label: "🍽️ Restaurant",        color: "#ffd6c0" },
+      "scene-travel":     { label: "✈️ Reisen",             color: "#c8eaff" },
+      "scene-shopping":   { label: "🛍️ Einkaufen",         color: "#b8f0d8" },
+      "scene-gym":        { label: "💪 Gym",                color: "#fff2b0" },
+      "scene-doctor":     { label: "🏥 Arzt",               color: "#ddd6ff" },
+      "scene-café":       { label: "☕ Café",               color: "#ffb3b3" },
+    };
+
+    // ── SYSTEM PROMPTS ────────────────────────────────────────────────────
+    function getSystemPrompt(mode) {
+      const feedbackRule = `\n\nFORMAT: Trenne deine Antwort IMMER mit "|||FEEDBACK|||". Davor deine spanische Antwort mit konkreter Frage am Ende. Danach 1-2 Sätze Feedback auf Deutsch (was gut war / kleine Verbesserung). Beim allerersten Opening-Message schreib nach dem Trennzeichen nichts.`;
+      const base = `Du bist Rex, ein freundlicher T-Rex und geduldiger Spanischlehrer. Die Lernerin heißt Nicole und ist auf C1-Niveau. IMMER auf Spanisch antworten. IMMER am Ende eine konkrete Frage stellen. Kurz halten (2–4 Sätze + Frage).` + feedbackRule;
+      return ({
+        chat:               base + " Führe ein lockeres Alltagsgespräch.",
+        correct:            base + " Modus Satzkorrektur: Wiederhole den korrekten Satz, erkläre kurz auf Deutsch was ggf. falsch war, dann neue Frage auf Spanisch.",
+        "scene-restaurant": base + " Du bist Kellner in einem spanischen Restaurant. Bleib in der Rolle.",
+        "scene-travel":     base + " Du bist Mitarbeiter am Flughafen oder hilfsbereiter Einheimischer. Typische Reisesituationen.",
+        "scene-shopping":   base + " Du bist Verkäufer in einem spanischen Geschäft. Typische Einkaufssituationen.",
+        "scene-gym":        base + " Du bist Personal Trainer in einem spanischen Fitnessstudio. Themen: Training, Übungen, Ernährung, Fortschritte.",
+        "scene-doctor":     base + " Du bist Arzt in einer spanischen Praxis. Typische Arztgespräche.",
+        "scene-café":       base + " Du bist Barista in einem spanischen Café. Bestellungen, Small Talk.",
+      })[mode] || base;
+    }
+
+    function getOpeningPrompt(mode) {
+      return ({
+        chat:               "Begrüße Nicole herzlich auf Spanisch und stelle eine einfache offene Frage über ihren Tag.",
+        correct:            "Begrüße Nicole auf Spanisch (mit kurzer deutscher Erklärung in Klammern) und gib ihr ein erstes Thema vor, über das sie einen Satz sagen soll.",
+        "scene-restaurant": "Rollenspiel startet. Begrüße die Gästin als Kellner und frage ob sie reserviert hat.",
+        "scene-travel":     "Rollenspiel startet. Begrüße die Reisende am Check-in-Schalter.",
+        "scene-shopping":   "Rollenspiel startet. Begrüße die Kundin freundlich im Geschäft.",
+        "scene-gym":        "Rollenspiel startet. Begrüße die Trainingspartnerin im Gym und frage nach ihren Zielen.",
+        "scene-doctor":     "Rollenspiel startet. Begrüße die Patientin und frage was sie heute zu dir führt.",
+        "scene-café":       "Rollenspiel startet. Begrüße die Gästin als Barista und frage nach der Bestellung.",
+      })[mode] || "Begrüße Nicole herzlich auf Spanisch.";
+    }
+
+    // ── iOS AUDIO UNLOCK ─────────────────────────────────────────────────
+    // iOS Safari blockiert speechSynthesis nach async-Operationen.
+    // Beim ersten Touch wird die Audio-Session entsperrt.
+    (function() {
+      function unlock() {
+        if (!window.speechSynthesis) return;
+        const u = new SpeechSynthesisUtterance("");
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+        setTimeout(() => { try { window.speechSynthesis.cancel(); } catch(_) {} }, 500);
+      }
+      document.addEventListener("touchstart", unlock, { once: true });
+      document.addEventListener("click",      unlock, { once: true });
+    })();
+
+    // ── TEXT-TO-SPEECH ────────────────────────────────────────────────────
+    let ttsActive = false; // Flag: soll TTS gerade aktiv sein?
+
+    function speak(text, onDone) {
+      if (!window.speechSynthesis) { if (onDone) onDone(); return; }
+      ttsActive = true;
+      window.speechSynthesis.cancel();
+      // iOS: Audio-Session reaktivieren (nach await-Unterbrechung)
+      try { window.speechSynthesis.resume(); } catch(_) {}
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.lang  = "es-ES";
+      utt.rate  = 1.0;
+      utt.pitch = 1.0;
+      utt.onend = () => { ttsActive = false; if (onDone) onDone(); };
+      // Wenn Speech abgebrochen wird (z.B. durch Mic-Klick), onDone NICHT aufrufen
+      utt.onerror = (e) => {
+        ttsActive = false;
+        if (e.error !== "interrupted" && e.error !== "canceled" && onDone) onDone();
+      };
+      const go = () => {
+        const voices = window.speechSynthesis.getVoices();
+        const voice  = voices.find(v => v.lang === "es-ES")
+                    || voices.find(v => v.lang === "es-MX")
+                    || voices.find(v => v.lang.startsWith("es"));
+        if (voice) utt.voice = voice;
+        window.speechSynthesis.speak(utt);
+      };
+      window.speechSynthesis.getVoices().length > 0
+        ? go()
+        : window.speechSynthesis.addEventListener("voiceschanged", go, { once: true });
+    }
+
+    // ── iOS-ERKENNUNG ─────────────────────────────────────────────────────
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !!navigator.maxTouchPoints;
+
+    // ── HAUPT-APP ─────────────────────────────────────────────────────────
+    function App() {
+      const [apiKey,      setApiKey]      = useState(() => localStorage.getItem("rex_gemini_key") || "");
+      const [keyInput,    setKeyInput]    = useState("");
+      const [screen,      setScreen]      = useState(() => localStorage.getItem("rex_gemini_key") ? "mode" : "setup");
+      const [mode,        setMode]        = useState("");
+      const [messages,    setMessages]    = useState([]);
+      const [feedback,    setFeedback]    = useState("");
+      const [status,      setStatus]      = useState("Drücke das Mikrofon und sprich auf Spanisch");
+      const [isRecording, setIsRecording] = useState(false);
+      const [isThinking,  setIsThinking]  = useState(false);
+      const [isSpeaking,  setIsSpeaking]  = useState(false);
+      const [transcript,  setTranscript]  = useState("");
+      const [sessionLog,  setSessionLog]  = useState([]);
+      const [summary,     setSummary]     = useState("");
+      const [rexPulse,    setRexPulse]    = useState(false);
+
+      const recRef       = useRef(null);
+      const recActiveRef = useRef(false);
+      const transRef  = useRef("");
+      const convRef   = useRef([]);
+      const modeRef   = useRef("");   // Ref für stabilen mode-Zugriff in async
+      const keyRef    = useRef(apiKey);
+      const msgEndRef = useRef(null);
+
+      useEffect(() => {
+        msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, [messages, feedback]);
+
+      // TTS im Hintergrund: verhindert Chrome-Pause + setzt fort wenn Tab zurück
+      useEffect(() => {
+        const keepAlive = setInterval(() => {
+          if (ttsActive && window.speechSynthesis?.speaking && !window.speechSynthesis?.paused) {
+            window.speechSynthesis.pause();
+            window.speechSynthesis.resume();
+          }
+        }, 10000);
+        const onVisibility = () => {
+          if (ttsActive && !document.hidden && window.speechSynthesis?.paused) {
+            window.speechSynthesis.resume();
+          }
+        };
+        document.addEventListener("visibilitychange", onVisibility);
+        return () => {
+          clearInterval(keepAlive);
+          document.removeEventListener("visibilitychange", onVisibility);
+        };
+      }, []);
+
+      // ── API-KEY SPEICHERN ──
+      function saveKey() {
+        const k = keyInput.trim();
+        if (!k) return;
+        localStorage.setItem("rex_gemini_key", k);
+        keyRef.current = k;
+        setApiKey(k);
+        setScreen("mode");
+      }
+
+      // ── GEMINI API AUFRUFEN ──
+      async function callGemini(userText, isOpening = false) {
+        setIsThinking(true);
+        setRexPulse(true);
+        setStatus("Rex denkt nach...");
+
+        if (!isOpening) {
+          convRef.current.push({ role: "user", parts: [{ text: userText }] });
+        }
+
+        const contents = isOpening
+          ? [{ role: "user", parts: [{ text: userText }] }]
+          : convRef.current;
+
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${keyRef.current}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                systemInstruction: { parts: [{ text: getSystemPrompt(modeRef.current) }] },
+                contents,
+                generationConfig: { maxOutputTokens: 1000 },
+              }),
+            }
+          );
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message);
+
+          const full   = data.candidates?.[0]?.content?.parts?.[0]?.text || "¡Ups! Algo salió mal.";
+          const [sp, fb] = full.split("|||FEEDBACK|||");
+          const reply  = sp.trim().replace(/\|+$/, "").trim();
+          const fbText = fb?.trim() || "";
+
+          convRef.current.push({ role: "model", parts: [{ text: full }] });
+          setMessages(prev => [...prev, { role: "rex", text: reply }]);
+          setFeedback(fbText);
+          setSessionLog(prev => [...prev, { role: "rex", text: reply, feedback: fbText }]);
+
+          // Rex vorlesen
+          setIsSpeaking(true);
+          setStatus("🔊 Rex spricht...");
+          speak(reply, () => {
+            setIsSpeaking(false);
+            setStatus("Drücke das Mikrofon und sprich auf Spanisch");
+          });
+
+        } catch (e) {
+          setMessages(prev => [...prev, { role: "rex", text: `¡Error! ${e.message} – Bitte API-Key prüfen 🦖` }]);
+          setStatus("Fehler aufgetreten");
+        }
+
+        setIsThinking(false);
+        setRexPulse(false);
+      }
+
+      // ── MODUS STARTEN ──
+      async function startMode(m) {
+        modeRef.current = m;
+        setMode(m);
+        convRef.current = [];
+        setMessages([]);
+        setFeedback("");
+        setSessionLog([]);
+        setScreen("chat");
+        setStatus("Rex bereitet sich vor...");
+        await callGemini(getOpeningPrompt(m), true);
+      }
+
+      // ── AUFNAHME STARTEN ──
+      function startRecording() {
+        ttsActive = false;
+        window.speechSynthesis?.cancel();
+        setIsSpeaking(false);
+
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { alert("Bitte Chrome oder Edge verwenden für die Spracherkennung."); return; }
+
+        transRef.current = "";
+        setTranscript("");
+        recActiveRef.current = true;
+        setIsRecording(true);
+        setStatus("🎙️ Ich höre zu... Drücke Fertig wenn du fertig bist!");
+
+        function makeAndStart() {
+          if (!recActiveRef.current) return;
+          const rec = new SR();
+          rec.lang           = "es-ES";
+          rec.continuous     = !isIOS;   // iOS unterstützt kein continuous
+          rec.interimResults = !isIOS;   // iOS: interim oft fehlerhaft
+
+          rec.onresult = (e) => {
+            let final = "", interim = "";
+            for (let i = e.resultIndex; i < e.results.length; i++) {
+              e.results[i].isFinal
+                ? (final  += e.results[i][0].transcript + " ")
+                : (interim += e.results[i][0].transcript);
+            }
+            transRef.current += final;
+            setTranscript(transRef.current + interim);
+          };
+
+          // Nach Ende: neue Instanz starten (iOS braucht neue Instanz)
+          rec.onend = () => {
+            if (recActiveRef.current) {
+              setTimeout(makeAndStart, isIOS ? 250 : 0);
+            }
+          };
+
+          recRef.current = rec;
+          try { rec.start(); } catch(_) {}
+        }
+
+        makeAndStart();
+      }
+
+      // ── AUFNAHME STOPPEN & SENDEN ──
+      function stopAndSend() {
+        recActiveRef.current = false;
+        if (recRef.current) {
+          try { recRef.current.stop(); } catch(_) {}
+          recRef.current = null;
+        }
+        setIsRecording(false);
+
+        const text = transRef.current.trim();
+        setTranscript("");
+
+        if (!text) { setStatus("Kein Text erkannt – versuch es nochmal!"); return; }
+
+        setMessages(prev => [...prev, { role: "user", text }]);
+        setSessionLog(prev => [...prev, { role: "user", text }]);
+        callGemini(text, false);
+      }
+
+      // ── SESSION BEENDEN ──
+      async function endSession() {
+        recActiveRef.current = false;
+        if (recRef.current) {
+          try { recRef.current.stop(); } catch(_) {}
+          recRef.current = null;
+        }
+        ttsActive = false;
+        window.speechSynthesis?.cancel();
+        setIsRecording(false);
+        setScreen("summary");
+        setSummary("Zusammenfassung wird erstellt...");
+
+        const log = sessionLog.map(e =>
+          e.role === "user"
+            ? `Nicole: ${e.text}`
+            : `Rex: ${e.text}${e.feedback ? `\n[Feedback: ${e.feedback}]` : ""}`
+        ).join("\n\n");
+
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${keyRef.current}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ role: "user", parts: [{ text:
+                  `Hier ist ein Spanisch-Übungsprotokoll:\n\n${log}\n\nErstelle eine kurze motivierende Zusammenfassung auf Deutsch:\n🌟 Was gut lief\n📚 Max. 3 Lernpunkte\n💪 Ermutigender Abschluss`
+                }]}],
+                generationConfig: { maxOutputTokens: 800 },
+              }),
+            }
+          );
+          const data = await res.json();
+          setSummary(data.candidates?.[0]?.content?.parts?.[0]?.text || "Super gemacht heute! 🦖");
+        } catch {
+          setSummary("¡Muy bien! Du hast heute fleißig Spanisch geübt. Weiter so! 🦖");
+        }
+      }
+
+      // ── RESET ──
+      function reset() {
+        ttsActive = false;
+        window.speechSynthesis?.cancel();
+        setScreen("mode");
+        setMode("");
+        setMessages([]);
+        setFeedback("");
+        setSessionLog([]);
+        setSummary("");
+        setTranscript("");
+        convRef.current = [];
+      }
+
+      // ── STYLES ────────────────────────────────────────────────────────────
+      const mob = window.innerWidth <= 480;
+      const S = {
+        wrap:      { fontFamily: "'Poppins','Segoe UI',sans-serif", minHeight: "100vh", background: "linear-gradient(135deg,#ddd0ff 0%,#8ec5f5 100%)", display: "flex", flexDirection: "column", alignItems: "center", padding: mob ? "14px 10px" : "20px 16px", width: "100%" },
+        h1:        { fontFamily: "'Poppins',sans-serif", fontSize: mob ? "1.45rem" : "2rem", fontWeight: 900, color: "#3d3560", marginBottom: 2, letterSpacing: mob ? 0 : 1 },
+        sub:       { color: "#7b72b0", fontSize: mob ? "0.82rem" : "0.9rem", fontWeight: 600, marginBottom: mob ? 14 : 24 },
+        card:      { background: "#fff", borderRadius: mob ? 18 : 24, boxShadow: "0 4px 24px rgba(100,80,180,.10)", padding: mob ? 14 : 28, width: "100%", maxWidth: 580, marginBottom: 12 },
+        h2:        { fontFamily: "'Poppins',sans-serif", fontSize: mob ? "1.1rem" : "1.3rem", fontWeight: 900, color: "#3d3560", marginBottom: mob ? 12 : 16 },
+        grid2:     { display: "grid", gridTemplateColumns: "1fr 1fr", gap: mob ? 10 : 14, marginBottom: mob ? 10 : 16 },
+        grid3:     { display: "grid", gridTemplateColumns: mob ? "repeat(2,1fr)" : "repeat(3,1fr)", gap: mob ? 8 : 12, marginBottom: mob ? 12 : 18 },
+        modeBtn:   c => ({ background: c, border: "none", borderRadius: 18, padding: "20px 12px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 8, transition: "transform .15s", width: "100%", fontFamily: "inherit" }),
+        scnBtn:    c => ({ background: c, border: "none", borderRadius: 14, padding: "16px 8px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 6, fontFamily: "inherit", fontWeight: 700, fontSize: "0.85rem", color: "#3d3560", width: "100%", transition: "transform .15s" }),
+        backBtn:   { background: "none", border: "2px solid #ddd", borderRadius: 12, padding: "8px 18px", fontFamily: "inherit", fontWeight: 700, color: "#7b72b0", cursor: "pointer", fontSize: "0.88rem" },
+        chatHd:    { display: "flex", alignItems: "center", gap: 14, marginBottom: 20 },
+        avatar:    p => ({ width: 60, height: 60, background: p ? "#5ecfa0" : "#b8f0d8", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "2rem", flexShrink: 0, transition: "background .3s", boxShadow: p ? "0 0 0 6px rgba(94,207,160,.3)" : "none" }),
+        msgs:      { minHeight: 140, maxHeight: mob ? 240 : 340, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 },
+        row:       r => ({ display: "flex", gap: 8, flexDirection: r === "user" ? "row-reverse" : "row", alignItems: "flex-start" }),
+        bubble:    r => ({ background: r === "rex" ? "#ddd6ff" : "#b8f0d8", borderRadius: 16, padding: "11px 15px", fontSize: "0.92rem", maxWidth: "78%", lineHeight: 1.55, color: "#3d3560", borderTopLeftRadius: r === "rex" ? 4 : 16, borderTopRightRadius: r === "user" ? 4 : 16 }),
+        typing:    { display: "flex", gap: 5, alignItems: "center", padding: "11px 16px", background: "#ddd6ff", borderRadius: 16, borderTopLeftRadius: 4, width: "fit-content" },
+        dot:       i => ({ width: 8, height: 8, background: "#9b8ff5", borderRadius: "50%", animation: `bounce 1.2s ${i * .2}s infinite` }),
+        fbBox:     { background: "#fff2b0", borderRadius: 14, padding: "13px 16px", marginBottom: 14, fontSize: "0.88rem", lineHeight: 1.5 },
+        transPrev: { background: "#f8f6ff", borderRadius: 12, padding: "9px 14px", fontSize: "0.87rem", color: "#9b8ff5", fontStyle: "italic", marginBottom: 12, minHeight: 36 },
+        ctrls:     { display: "flex", flexDirection: "column", alignItems: "center", gap: 12 },
+        micRow:    { display: "flex", gap: 14, alignItems: "center" },
+        micBtn:    r => ({ width: 66, height: 66, borderRadius: "50%", border: "none", background: r ? "#ff6b6b" : "#5ecfa0", color: "#fff", fontSize: "1.7rem", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: r ? "0 4px 16px rgba(255,107,107,.5)" : "0 4px 16px rgba(94,207,160,.4)", animation: r ? "micPulse 1s infinite" : "none" }),
+        doneBtn:   { background: "#ff9a72", color: "#fff", border: "none", borderRadius: 14, padding: "13px 20px", fontFamily: "inherit", fontWeight: 800, fontSize: "0.92rem", cursor: "pointer", boxShadow: "0 4px 16px rgba(255,154,114,.4)" },
+        statTxt:   { fontSize: "0.83rem", color: "#7b72b0", fontWeight: 600, textAlign: "center" },
+        endBtn:    { background: "none", border: "2px solid #ddd", borderRadius: 12, padding: "7px 16px", fontFamily: "inherit", fontWeight: 700, color: "#7b72b0", cursor: "pointer", fontSize: "0.82rem" },
+        spkBdg:    { display: "flex", alignItems: "center", gap: 6, background: "#b8f0d8", borderRadius: 20, padding: "4px 14px", fontSize: "0.8rem", fontWeight: 700, color: "#2a8060", cursor: "pointer", userSelect: "none" },
+        sumBox:    { background: "#f8f6ff", borderRadius: 14, padding: 18, fontSize: "0.92rem", lineHeight: 1.75, whiteSpace: "pre-wrap", marginBottom: 18, color: "#3d3560" },
+        bigBtn:    { width: "100%", background: "#9b8ff5", color: "#fff", border: "none", borderRadius: 14, padding: 14, fontFamily: "inherit", fontWeight: 800, fontSize: "1rem", cursor: "pointer" },
+        inp:       { width: "100%", padding: "12px 16px", borderRadius: 12, border: "2px solid #ddd6ff", fontFamily: "inherit", fontSize: "0.95rem", boxSizing: "border-box", outline: "none", color: "#3d3560" },
+        hint:      { color: "#7b72b0", fontSize: "0.85rem", lineHeight: 1.65, marginTop: 0, marginBottom: 16 },
+      };
+
+      // ── RENDER ────────────────────────────────────────────────────────────
+      return (
+        <div style={S.wrap}>
+          <style>{`
+            *, *::before, *::after { box-sizing: border-box; }
+            html, body { overflow-x: hidden; max-width: 100%; }
+            @keyframes bounce   { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-6px)} }
+            @keyframes micPulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.08)} }
+            button:hover { transform: translateY(-2px) !important; }
+          `}</style>
+
+          <div style={S.h1}>🦖 Rex habla español</div>
+          <div style={S.sub}>Dein persönlicher Gesprächstrainer</div>
+
+          {/* ── SETUP ── */}
+          {screen === "setup" && (
+            <div style={S.card}>
+              <div style={S.h2}>🔑 Google Gemini API-Key</div>
+              <p style={S.hint}>
+                1. Öffne <strong>aistudio.google.com</strong> und melde dich mit deinem Google-Konto an.<br />
+                2. Klicke oben links auf <strong>"Get API key"</strong>.<br />
+                3. Kopiere den Key und füge ihn hier ein:
+              </p>
+              <input
+                style={S.inp}
+                type="password"
+                placeholder="AIza..."
+                value={keyInput}
+                onChange={e => setKeyInput(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveKey()}
+              />
+              <button style={{ ...S.bigBtn, marginTop: 12 }} onClick={saveKey}>
+                🦖 Loslegen!
+              </button>
+            </div>
+          )}
+
+          {/* ── MODUS-WAHL ── */}
+          {screen === "mode" && (
+            <div style={S.card}>
+              <div style={S.h2}>Was möchtest du üben?</div>
+              <div style={S.grid2}>
+                {["chat", "correct"].map(m => (
+                  <button key={m} style={S.modeBtn(MODES[m].color)} onClick={() => startMode(m)}>
+                    <span style={{ fontSize: "2rem" }}>{m === "chat" ? "💬" : "✏️"}</span>
+                    <span style={{ fontWeight: 800, fontSize: "0.95rem", color: "#3d3560" }}>{MODES[m].label}</span>
+                    <span style={{ fontSize: "0.75rem", color: "#7b72b0", fontWeight: 600 }}>{MODES[m].desc}</span>
+                  </button>
+                ))}
+              </div>
+              <button style={{ ...S.modeBtn("#ffd6c0"), width: "100%" }} onClick={() => setScreen("scenario")}>
+                <span style={{ fontSize: "2rem" }}>🎭</span>
+                <span style={{ fontWeight: 800, fontSize: "0.95rem", color: "#3d3560" }}>Szenario-Rollenspiel</span>
+                <span style={{ fontSize: "0.75rem", color: "#7b72b0", fontWeight: 600 }}>Restaurant, Gym, Reisen und mehr</span>
+              </button>
+              <div style={{ textAlign: "right", marginTop: 12 }}>
+                <button style={{ ...S.backBtn, fontSize: "0.78rem" }} onClick={() => { setKeyInput(""); setScreen("setup"); }}>
+                  🔑 API-Key ändern
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── SZENARIO-WAHL ── */}
+          {screen === "scenario" && (
+            <div style={S.card}>
+              <div style={S.h2}>🎭 Wähle ein Szenario</div>
+              <div style={S.grid3}>
+                {["scene-restaurant","scene-travel","scene-shopping","scene-gym","scene-doctor","scene-café"].map(m => (
+                  <button key={m} style={S.scnBtn(MODES[m].color)} onClick={() => startMode(m)}>
+                    <span style={{ fontSize: "1.7rem" }}>{MODES[m].label.split(" ")[0]}</span>
+                    <span>{MODES[m].label.split(" ").slice(1).join(" ")}</span>
+                  </button>
+                ))}
+              </div>
+              <button style={S.backBtn} onClick={() => setScreen("mode")}>← Zurück</button>
+            </div>
+          )}
+
+          {/* ── CHAT ── */}
+          {screen === "chat" && (
+            <div style={S.card}>
+              <div style={S.chatHd}>
+                <div style={S.avatar(rexPulse)}>🦖</div>
+                <div>
+                  <div style={{ fontWeight: 900, fontSize: "1.1rem", color: "#3d3560" }}>Rex</div>
+                  <div style={{ fontSize: "0.78rem", color: "#7b72b0", fontWeight: 600 }}>{MODES[mode]?.label || mode}</div>
+                </div>
+                {isSpeaking && (
+                  <div
+                    style={S.spkBdg}
+                    title="Klicken zum Stoppen"
+                    onClick={() => {
+                      ttsActive = false;
+                      window.speechSynthesis?.cancel();
+                      setIsSpeaking(false);
+                      setStatus("Drücke das Mikrofon und sprich auf Spanisch");
+                    }}
+                  >
+                    🔊 spricht… ✕
+                  </div>
+                )}
+                <button style={{ ...S.backBtn, marginLeft: "auto" }} onClick={reset}>✕</button>
+              </div>
+
+              {/* Nachrichten */}
+              <div style={S.msgs}>
+                {messages.map((m, i) => (
+                  <div key={i} style={S.row(m.role)}>
+                    <span style={{ fontSize: "1.3rem", marginTop: 2 }}>{m.role === "rex" ? "🦖" : "🙋‍♀️"}</span>
+                    <div style={S.bubble(m.role)}>{m.text}</div>
+                  </div>
+                ))}
+                {isThinking && (
+                  <div style={S.row("rex")}>
+                    <span style={{ fontSize: "1.3rem" }}>🦖</span>
+                    <div style={S.typing}>
+                      {[0,1,2].map(i => <div key={i} style={S.dot(i)} />)}
+                    </div>
+                  </div>
+                )}
+                <div ref={msgEndRef} />
+              </div>
+
+              {/* Feedback */}
+              {feedback && (
+                <div style={S.fbBox}>
+                  <div style={{ fontWeight: 800, marginBottom: 4 }}>💡 Feedback von Rex</div>
+                  {feedback}
+                </div>
+              )}
+
+              {/* Transkript-Vorschau */}
+              {isRecording && transcript && (
+                <div style={S.transPrev}>🎙️ {transcript}</div>
+              )}
+
+              {/* Steuerung */}
+              <div style={S.ctrls}>
+                <div style={S.micRow}>
+                  <button
+                    style={S.micBtn(isRecording)}
+                    onClick={isRecording ? undefined : startRecording}
+                    disabled={isThinking}
+                    title={isThinking ? "Rex denkt noch..." : (isRecording ? "Läuft..." : "Aufnahme starten")}
+                  >
+                    {isRecording ? "🔴" : "🎙️"}
+                  </button>
+                  {isRecording && (
+                    <button style={S.doneBtn} onClick={stopAndSend}>
+                      ✅ Fertig gesprochen
+                    </button>
+                  )}
+                </div>
+                <div style={S.statTxt}>{status}</div>
+                {messages.length > 1 && (
+                  <button style={S.endBtn} onClick={endSession}>
+                    📊 Session beenden & Zusammenfassung
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── ZUSAMMENFASSUNG ── */}
+          {screen === "summary" && (
+            <div style={S.card}>
+              <div style={{ ...S.h2, textAlign: "center" }}>🌟 Deine Session</div>
+              <div style={S.sumBox}>{summary}</div>
+              <button style={S.bigBtn} onClick={reset}>🦖 Neue Übung starten</button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
